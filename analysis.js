@@ -1,4 +1,5 @@
 const fs = require("fs");
+const zlib = require("zlib");
 const stores = require("./stores");
 
 const STORE_KEYS = Object.keys(stores);
@@ -8,27 +9,37 @@ exports.STORE_KEYS = STORE_KEYS;
 function currentDate() {
     const currentDate = new Date();
     const year = currentDate.getFullYear();
-    const month = String(currentDate.getMonth() + 1).padStart(2, '0');
-    const day = String(currentDate.getDate()).padStart(2, '0');
+    const month = String(currentDate.getMonth() + 1).padStart(2, "0");
+    const day = String(currentDate.getDate()).padStart(2, "0");
     return `${year}-${month}-${day}`;
 }
 
 function readJSON(file) {
-    return JSON.parse(fs.readFileSync(file));
+    let data = fs.readFileSync(file)
+    if (file.endsWith(".gz")) data = zlib.gunzipSync(data);
+    return JSON.parse(data);
 }
+exports.readJSON = readJSON;
 
-function writeJSON(file, data) {
-    fs.writeFileSync(file, JSON.stringify(data, null, 2));
+function writeJSON(file, data, gzipped = false, spacer = 2, compressData = false) {
+    if (compressData) {
+        data = compress(data);
+    }
+    data = JSON.stringify(data, null, spacer);
+    if (gzipped) data = zlib.gzipSync(data);
+    fs.writeFileSync(`${file}${gzipped ? ".gz" : ""}`, data);
 }
+exports.writeJSON = writeJSON;
 
 function getCanonicalFor(store, rawItems, today) {
+    console.log(`Converting ${store}-${today} to canonical.`);
     const canonicalItems = [];
     for (let i = 0; i < rawItems.length; i++) {
         const item = stores[store]?.getCanonical(rawItems[i], today);
         if (item)
             canonicalItems.push({
                 store,
-                ...item
+                ...item,
             });
     }
     return canonicalItems;
@@ -37,7 +48,7 @@ function getCanonicalFor(store, rawItems, today) {
 function mergePriceHistory(oldItems, items) {
     if (oldItems == null) return items;
 
-    const lookup = {}
+    const lookup = {};
     for (oldItem of oldItems) {
         lookup[oldItem.store + oldItem.id] = oldItem;
     }
@@ -58,7 +69,7 @@ function mergePriceHistory(oldItems, items) {
         }
     }
 
-    console.log(`${Object.keys(lookup).length} not in latest list.`)
+    console.log(`${Object.keys(lookup).length} not in latest list.`);
     for (key of Object.keys(lookup)) {
         items.push(lookup[key]);
     }
@@ -92,8 +103,8 @@ function compress(items) {
     const compressed = {
         stores: STORE_KEYS,
         n: items.length,
-        data: []
-    }
+        data: [],
+    };
     const data = compressed.data;
     for (item of items) {
         data.push(STORE_KEYS.indexOf(item.store));
@@ -108,36 +119,7 @@ function compress(items) {
         data.push(item.quantity);
         data.push(item.isWeighted ? 1 : 0);
         data.push(item.bio ? 1 : 0);
-        switch (item.store) {
-            case "billa":
-                data.push(item.url?.replace("https://shop.billa.at", ""));
-                break;
-            case "dm":
-            case "dmDe":
-                data.push("");
-                break;
-            case "hofer":
-                data.push(item.url?.replace("https://www.roksh.at/hofer/produkte/", ""));
-                break;
-            case "lidl":
-                data.push(item.url?.replace("https://www.lidl.at", ""));
-                break;
-            case "mpreis":
-                data.push("");
-                break;
-            case "spar":
-                data.push(item.url?.replace("https://www.interspar.at/shop/lebensmittel", ""));
-                break;
-            case "unimarkt":
-                data.push(item.url?.replace("https://shop.unimarkt.at", ""));
-                break;
-            case "reweDe":
-                data.push("");
-                break;
-            case "penny":
-                data.push(item.url?.replace("https://www.penny.at", ""));
-                break;
-        }
+        data.push(item.url?.replace(stores[item.store].urlBase, ""));
     }
     return compressed;
 }
@@ -148,10 +130,9 @@ exports.compress = compress;
 exports.replay = function (rawDataDir) {
     const today = currentDate();
 
-    const files = fs.readdirSync(rawDataDir).filter(
-        file => file.indexOf("canonical") == -1 &&
-            STORE_KEYS.some(store => file.indexOf(`${store}-`) == 0)
-    );
+    const files = fs
+        .readdirSync(rawDataDir)
+        .filter((file) => file.indexOf("canonical") == -1 && STORE_KEYS.some((store) => file.indexOf(`${store}-`) == 0));
 
     const dateSort = (a, b) => {
         const dateA = new Date(a.match(/\d{4}-\d{2}-\d{2}/)[0]);
@@ -159,7 +140,11 @@ exports.replay = function (rawDataDir) {
         return dateA - dateB;
     };
 
-    const getFilteredFilesFor = (store) => files.filter(file => file.indexOf(`${store}-`) == 0).sort(dateSort).map(file => rawDataDir + "/" + file);
+    const getFilteredFilesFor = (store) =>
+        files
+            .filter((file) => file.indexOf(`${store}-`) == 0)
+            .sort(dateSort)
+            .map((file) => rawDataDir + "/" + file);
 
     const storeFiles = {};
     const canonicalFiles = {};
@@ -171,13 +156,13 @@ exports.replay = function (rawDataDir) {
     }
 
     const allFilesCanonical = [];
-    const len = Math.max(...Object.values(canonicalFiles).map(filesByStore => filesByStore.length));
+    const len = Math.max(...Object.values(canonicalFiles).map((filesByStore) => filesByStore.length));
     for (let i = 0; i < len; i++) {
         const canonical = [];
-        Object.values(canonicalFiles).forEach(filesByStore => {
+        Object.values(canonicalFiles).forEach((filesByStore) => {
             const file = filesByStore.pop();
             if (file) canonical.push(...file);
-        })
+        });
         allFilesCanonical.push(canonical);
     }
 
@@ -192,18 +177,18 @@ exports.replay = function (rawDataDir) {
         prev = curr;
     }
     return curr;
-}
+};
 
 exports.updateData = async function (dataDir, done) {
     const today = currentDate();
     console.log("Fetching data for date: " + today);
-    const storeFetchPromises = []
+    const storeFetchPromises = [];
     for (const store of STORE_KEYS) {
         storeFetchPromises.push(new Promise(async (resolve) => {
             const start = performance.now();
             try {
                 const storeItems = await stores[store].fetchData();
-                fs.writeFileSync(`${dataDir}/${store}-${today}.json`, JSON.stringify(storeItems, null, 2));
+                writeJSON(`${dataDir}/${store}-${today}.json`, storeItems, true);
                 const storeItemsCanonical = getCanonicalFor(store, storeItems, today);
                 console.log(`Fetched ${store.toUpperCase()} data, took ${(performance.now() - start) / 1000} seconds`);
                 resolve(storeItemsCanonical)
@@ -214,17 +199,38 @@ exports.updateData = async function (dataDir, done) {
         }));
     }
 
-    const items = [].concat(...await Promise.all(storeFetchPromises));
+    const items = [].concat(...(await Promise.all(storeFetchPromises)));
 
-    if (fs.existsSync(`${dataDir}/latest-canonical.json`)) {
-        const oldItems = JSON.parse(fs.readFileSync(`${dataDir}/latest-canonical.json`));
+    if (fs.existsSync(`${dataDir}/latest-canonical.json.gz`)) {
+        const oldItems = readJSON(`${dataDir}/latest-canonical.json.gz`);
         mergePriceHistory(oldItems, items);
         console.log("Merged price history");
     }
 
     sortItems(items);
-    fs.writeFileSync(`${dataDir}/latest-canonical.json`, JSON.stringify(items, null, 2));
+    writeJSON(`${dataDir}/latest-canonical.json`, items, true);
 
     if (done) done(items);
     return items;
+};
+
+exports.migrateToGzip = (dataDir) => {
+    if (fs.existsSync(`${dataDir}/latest-canonical.json`)) {
+        console.log("Migrating old .json data to .json.gz");
+        const files = fs.readdirSync(dataDir).filter(
+            file => file.indexOf("canonical") == -1 &&
+               STORE_KEYS.some(store => file.indexOf(`${store}-`) == 0)
+        );
+        files.push(`latest-canonical.json`);
+        for(const file of files) {
+            // skip if already gzipped
+            if (file.indexOf(".gz") != -1) continue;
+
+            const path = `${dataDir}/${file}`
+            console.log(`${path} -> ${path}.gz`);
+            const data = readJSON(path);
+            writeJSON(path, data, true);
+            fs.unlinkSync(path);
+        }
+    }
 }
